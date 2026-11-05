@@ -130,9 +130,11 @@ def inject_css(pink):
     st.markdown(f"""<style>
 #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"],
 [data-testid="stStatusWidget"] {{display:none !important;}}
-header[data-testid="stHeader"] {{background:transparent;}}
-.stApp {{background:{bg};}}
-.block-container {{max-width:640px; padding:1rem 1rem 3rem 1rem;}}
+header[data-testid="stHeader"] {{display:none !important; pointer-events:none !important;}}
+.stApp, [data-testid="stApp"], [data-testid="stAppViewContainer"], [data-testid="stMain"],
+section.main, .main {{background:{bg} !important;}}
+.block-container, [data-testid="stMainBlockContainer"] {{
+  max-width:640px; padding:3.5rem 1rem 3rem 1rem !important;}}
 html, body, .stApp, .stMarkdown, label, p, li {{
   font-family:'Segoe UI', system-ui, -apple-system, Roboto, 'Helvetica Neue', Arial, sans-serif;
   color:{c.TEXT_DARK};}}
