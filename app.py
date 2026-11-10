@@ -9,19 +9,23 @@ app.py
 """
 
 import html
+import mimetypes
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, time as dtime, timedelta, timezone
 
 import streamlit as st
 
 import colors as c
 import db
+import db_files
+import db_finance
 import db_hr
 import db_it
 import db_registrar
-from constants import (ACTIVE_INSTRUCTOR, DEPARTMENTS, DEPARTMENTS_SHORT, KIND_LABELS,
-                       KIND_PLURAL, MAX_COURSES, PASSWORD_RULES_TEXT, RELATIONSHIP_RU,
-                       RELATIONSHIPS, STATUSES, WEEKDAYS_RU, status_label)
+from constants import (ACTIVE_INSTRUCTOR, ALLOWED_TYPES, DEPARTMENTS, DEPARTMENTS_SHORT, FUNDING,
+                       FUNDING_RU, KIND_LABELS, KIND_PLURAL, MAX_COURSES, MAX_FILE_MB,
+                       PASSWORD_RULES_TEXT, PAYMENT_METHODS, RELATIONSHIP_RU, RELATIONSHIPS,
+                       STATUSES, WEEKDAYS_RU, status_label)
 from db_core import _get
 from utils import format_grade, get_academic_week, matches
 
@@ -34,7 +38,7 @@ RELATIONSHIP_BY_RU = dict(RELATIONSHIPS)
 # Время в журналах база хранит по UTC (Neon). Казахстан сейчас UTC+5.
 TZ_OFFSET_HOURS = int(_get("TZ_OFFSET_HOURS", 5))
 
-STAFF_START_PAGE = {"HR": "hr_home", "Registrar": "reg_list", "IT": "it_home"}
+STAFF_START_PAGE = {"HR": "hr_home", "Registrar": "reg_list", "IT": "it_home", "Accounting": "acc_list"}
 LIST_PAGE_BY_KIND = {"student": "it_students", "instructor": "it_instructors", "staff": "it_staff"}
 PINK_PAGES = {"student_home", "instructor_home", "hr_home", "it_home", "status_role", "it_menu"}
 
@@ -124,6 +128,56 @@ def fmt_dt(value):
     return (value + timedelta(hours=TZ_OFFSET_HOURS)).strftime("%d.%m.%Y %H:%M")
 
 
+def utc_now():
+    """Сейчас по UTC (так же, как хранятся даты в базе)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def kzt(value):
+    """250000 -> '250 000 ₸'"""
+    return f"{int(round(float(value))):,}".replace(",", " ") + " ₸"
+
+
+def fmt_size(n):
+    return f"{n / 1024:.0f} КБ" if n < 1024 * 1024 else f"{n / 1024 / 1024:.1f} МБ"
+
+
+def chip(kind, text):
+    """Цветная плашка: ok — зелёная, bad — красная, wait — серая."""
+    return f'<span class="chip {kind}">{esc(text)}</span>'
+
+
+def hw_status(deadline, submission_id, on_time):
+    """Статус домашки: зелёный — сдано вовремя, красный — опоздал / просрочено."""
+    if submission_id:
+        return ("ok", "Сдано вовремя") if on_time else ("bad", "Сдано с опозданием")
+    left = deadline - utc_now()
+    if left.total_seconds() <= 0:
+        return "bad", "Просрочено, не сдано"
+    days, hours = left.days, left.seconds // 3600
+    return "wait", "Не сдано · осталось " + (f"{days} д {hours} ч" if days else f"{hours} ч")
+
+
+def upload_key(prefix):
+    return f"{prefix}_{ss.get('_upl', 0)}"
+
+
+def bump_upload():
+    """После успешной загрузки поле выбора файла очищается."""
+    ss["_upl"] = ss.get("_upl", 0) + 1
+
+
+def file_button(label, key, opener, *args, file_name):
+    """Кнопка «Скачать»: файл достаётся из хранилища только в момент нажатия."""
+    def _data():
+        try:
+            return opener(*args)[2]
+        except Exception:
+            return b""
+    st.download_button(label, data=_data, file_name=file_name, key=key,
+                       mime=mimetypes.guess_type(file_name)[0] or "application/octet-stream")
+
+
 def inject_css(pink):
     bg = c.PINK_BG if pink else c.WHITE
     sec_bg = c.WHITE if pink else c.GRAY_LIGHT
@@ -176,6 +230,10 @@ table.info td.v {{font-weight:700; word-break:break-word;}}
 table.grid {{border-collapse:collapse; width:100%; font-size:.95rem;}}
 table.grid th {{background:{c.PINK_BG}; text-align:left; padding:.5rem .5rem; white-space:nowrap;}}
 table.grid td {{padding:.5rem .5rem; border-bottom:1px solid {c.GRAY_LINE}; vertical-align:top;}}
+.chip {{display:inline-block; padding:.15rem .65rem; border-radius:999px; font-weight:700; font-size:.85rem;}}
+.chip.ok {{background:#DDF4E4; color:#1B7A43;}}
+.chip.bad {{background:#FDE2E2; color:#B3261E;}}
+.chip.wait {{background:{c.GRAY_LIGHT}; color:{c.GRAY_TEXT};}}
 .detail {{white-space:pre-wrap; background:{c.GRAY_FIELD}; padding:.7rem .8rem; border-radius:8px;}}
 div[data-testid="stForm"] {{border:none; padding:0; background:transparent;}}
 </style>""", unsafe_allow_html=True)
@@ -214,9 +272,12 @@ def info_table(rows):
     st.markdown(f'<table class="info">{body}</table>', unsafe_allow_html=True)
 
 
-def grid_table(headers, rows):
+def grid_table(headers, rows, raw=()):
+    """raw — номера колонок, где лежит готовый HTML (плашки); остальное экранируется."""
     head = "".join(f"<th>{esc(h)}</th>" for h in headers)
-    body = "".join("<tr>" + "".join(f"<td>{esc(v)}</td>" for v in r) + "</tr>" for r in rows)
+    body = "".join(
+        "<tr>" + "".join(f"<td>{v if i in raw else esc(v)}</td>" for i, v in enumerate(r)) + "</tr>"
+        for r in rows)
     st.markdown(f'<div class="tbl-wrap"><table class="grid"><thead><tr>{head}</tr></thead>'
                 f'<tbody>{body}</tbody></table></div>', unsafe_allow_html=True)
 
@@ -309,7 +370,9 @@ def p_login():
 def p_student_home():
     u = ss.user
     home(u["name"], [f"Текущая учебная неделя: {get_academic_week()}"],
-         [("Личная информация", "student_info"), ("Оценки", "student_grades")])
+         [("Личная информация", "student_info"), ("Оценки", "student_grades"),
+          ("Материалы курсов", "student_materials"), ("Домашние задания", "student_homework"),
+          ("Финансы", "student_finance")])
 
 
 def p_student_info():
@@ -357,7 +420,8 @@ def p_instructor_home():
     today = date.today()
     home(u["name"], [f"Текущая учебная неделя: {get_academic_week(today)}",
                      f"Сегодня: {WEEKDAYS_RU[today.weekday()]}"],
-         [("Личная информация", "instructor_info"), ("Предмет", "instructor_subject")])
+         [("Личная информация", "instructor_info"), ("Предмет", "instructor_subject"),
+          ("Материалы курса", "instructor_materials"), ("Домашние задания", "instructor_homework")])
 
 
 def p_instructor_info():
@@ -454,6 +518,7 @@ def p_hr_add_student():
         last = st.text_input("Фамилия")
         iin = st.text_input("ИИН (12 цифр)", max_chars=12)
         year = st.selectbox("Курс обучения", [1, 2, 3, 4], index=None, placeholder="Выбери курс")
+        funding_ru = st.selectbox("Форма обучения", [ru for _, ru in FUNDING], index=0)
         st.text_input("ID студента", value=next_id, disabled=True)
         st.text_input("Почта", value="создаётся автоматически", disabled=True)
         st.text_input("Пароль", value="********", disabled=True)
@@ -479,6 +544,13 @@ def p_hr_add_student():
         return
     note = (" Экстренный контакт с таким именем уже был в системе — студент привязан к нему."
             if result["contact_reused"] else "")
+    funding = next(v for v, ru in FUNDING if ru == funding_ru)
+    if funding != "paid":
+        try:
+            db_finance.set_funding(ss.user, result["student_id"], funding)
+            note += f" Форма обучения: {funding_ru}."
+        except Exception as exc:
+            note += f" Не удалось записать форму обучения ({exc}) — измени её в «Изменить статус»."
     flash("success", f"Студент добавлен: {md(result['name'])} · ID {result['student_id']} · "
                      f"почта {md(result['email'])}. Пароль создан автоматически "
                      f"(его видит только IT-департамент).{note}")
@@ -587,6 +659,24 @@ def p_status_edit():
 
     if kind != "student":          # преподавателей удалять нельзя — только менять статус
         return
+
+    section("Форма обучения")
+    cur_f = q("funding", db_finance.get_funding, person["id"])
+    f_values = [v for v, _ in FUNDING]
+    f_pick = st.selectbox("Форма обучения", range(len(FUNDING)), index=f_values.index(cur_f) if cur_f in f_values else None,
+                          format_func=lambda k: FUNDING[k][1], key=f"funding_sel_{person['id']}",
+                          label_visibility="collapsed")
+    if st.button("Сохранить форму обучения", key="funding_save"):
+        try:
+            changed = db_finance.set_funding(ss.user, person["id"], f_values[f_pick])
+        except Exception as exc:
+            show_error(exc)
+        else:
+            if changed:
+                flash("success", f"Форма обучения изменена: {FUNDING_RU[f_values[f_pick]]}.")
+                refresh()
+            else:
+                st.info("Эта форма обучения уже установлена.")
     if ss.confirm == ("delete", person["id"]):
         st.warning(f"Удалить студента {person['name']} (ID {person['id']}) из системы?\n\n"
                    f"Вместе с ним удалятся его записи на курсы и оценки. "
@@ -594,6 +684,7 @@ def p_status_edit():
         col1, col2 = st.columns(2)
         if col1.button("Да, удалить", key="del_yes", type="primary"):
             try:
+                db_files.purge_student_objects(person["id"])
                 db_hr.delete_student(ss.user, person["id"])
             except Exception as exc:
                 show_error(exc)
@@ -634,6 +725,7 @@ def p_reg_student():
 
     courses = q("courses", db_registrar.get_student_courses, student["id"], default=[])
     available = q("available", db_registrar.get_available_courses, student["id"], default=[])
+    prices = q("prices", db_finance.get_course_prices, default={})
     badge(f"Курсы: {len(courses)} из {MAX_COURSES}")
 
     pending = ss.confirm
@@ -660,13 +752,17 @@ def p_reg_student():
         subtitle("Пока нет ни одного курса.", gray=True)
     for it in courses:
         with st.container(border=True):
-            st.markdown(f"**{md(it['course_code'])}** — {md(it['course_name'])}  \n{md(it['semester'])}")
+            price = prices.get(it["course_code"])
+            st.markdown(f"**{md(it['course_code'])}** — {md(it['course_name'])}  \n{md(it['semester'])}"
+                        + (f" · {kzt(price[1])}" if price else ""))
             st.button("Удалить", key=f"rm_{it['course_code']}_{it['semester']}", on_click=set_confirm,
                       args=(("remove", it["course_code"], it["semester"]),))
 
     section("Добавить курс")
     pick = st.selectbox("Курс", range(len(available)), index=None, placeholder="Выбери курс",
-                        format_func=lambda k: f"{available[k][0]} — {available[k][1]}",
+                        format_func=lambda k: f"{available[k][0]} — {available[k][1]}" + (
+                            f" · {prices[available[k][0]][0]} кр. · {kzt(prices[available[k][0]][1])}"
+                            if available[k][0] in prices else ""),
                         key=f"add_course_{student['id']}", label_visibility="collapsed")
     if st.button("Добавить", key="add_course_btn", type="primary"):
         if pick is None:
@@ -765,109 +861,4 @@ def p_it_profile():
     with st.expander("Изменить имя"):
         with st.form("edit_name"):
             new_name = st.text_input("Правильное имя и фамилия", value=profile["name"])
-            ok = st.form_submit_button("Сохранить имя", type="primary")
-        if ok:
-            try:
-                changed = db_it.update_name(ss.user, kind, person["id"], new_name)
-            except Exception as exc:
-                show_error(exc)
-            else:
-                if changed:
-                    flash("success", "Имя исправлено. Изменение записано в журнал.")
-                refresh()
-
-    with st.expander("Изменить пароль"):
-        st.caption(PASSWORD_RULES_TEXT)
-        with st.form("edit_password"):
-            new_pw = st.text_input(f"Новый пароль для {profile['name']}")
-            ok = st.form_submit_button("Сохранить пароль", type="primary")
-        if ok:
-            try:
-                db_it.change_password(ss.user, kind, person["id"], new_pw.strip())
-            except Exception as exc:
-                show_error(exc)
-            else:
-                flash("success", "Пароль изменён. Действие записано в журнал.")
-                refresh()
-
-
-def p_it_history():
-    person = ss.ctx.get("it_person")
-    back_bar("← Назад", "it_menu")
-    if not person:
-        return
-    title("История")
-    subtitle(f"{person['name']} · {KIND_LABELS[person['kind']]} · нажми на строку, чтобы увидеть всё",
-             gray=True)
-    events = q("history", db_it.get_history, person["kind"], person["id"], default=[])
-    if not events:
-        subtitle("Пока нет записей.", gray=True)
-        return
-    for i, e in enumerate(events):
-        label = f"{fmt_dt(e['time'])} — {md(e['title'])}" + (f" · {md(e['short'])}" if e["short"] else "")
-        with st.expander(label):
-            st.markdown(f'<div class="detail">{esc(e["details"])}</div>', unsafe_allow_html=True)
-
-
-def p_it_inst_students():
-    person = ss.ctx.get("it_person")
-    back_bar("← Назад", "it_profile")
-    if not person:
-        return
-    title("Студенты преподавателя")
-    students = q("inst_students", db_it.get_instructor_students, person["id"], default=[])
-    subtitle(f"{person['name']} · всего студентов: {len({s['id'] for s in students})}", gray=True)
-    if not students:
-        subtitle("У этого преподавателя пока нет студентов.", gray=True)
-        return
-    grid_table(["ID", "Имя и фамилия", "Курс обучения", "Предмет"],
-               [(s["id"], s["name"], f"{s['course_year']} курс" if s["course_year"] else "—", s["course"])
-                for s in students])
-
-
-# ============================================================== маршрутизация ==
-
-PAGES = {
-    "login": p_login,
-    "student_home": p_student_home, "student_info": p_student_info, "student_grades": p_student_grades,
-    "instructor_home": p_instructor_home, "instructor_info": p_instructor_info,
-    "instructor_subject": p_instructor_subject,
-    "hr_home": p_hr_home, "hr_add_student": p_hr_add_student, "hr_add_instructor": p_hr_add_instructor,
-    "status_role": p_status_role, "status_list": p_status_list, "status_edit": p_status_edit,
-    "reg_list": p_reg_list, "reg_student": p_reg_student,
-    "it_home": p_it_home,
-    "it_students": lambda: p_it_list("student"),
-    "it_instructors": lambda: p_it_list("instructor"),
-    "it_staff": lambda: p_it_list("staff"),
-    "it_menu": p_it_menu, "it_profile": p_it_profile, "it_history": p_it_history,
-    "it_inst_students": p_it_inst_students,
-}
-
-
-def allowed(page):
-    """Страница доступна только своей роли (и своему департаменту у сотрудников)."""
-    if page == "login":
-        return True
-    if ss.user is None:
-        return False
-    if page.startswith("student_"):
-        return ss.role == "student"
-    if page.startswith("instructor_"):
-        return ss.role == "instructor"
-    dep = {"hr_": "HR", "status_": "HR", "reg_": "Registrar", "it_": "IT"}
-    for prefix, department in dep.items():
-        if page.startswith(prefix):
-            return ss.role == "staff" and ss.user["department"] == department
-    return False
-
-
-def main():
-    _init()
-    if ss.page not in PAGES or not allowed(ss.page):
-        ss.page = "login"
-    inject_css(ss.page in PINK_PAGES)
-    show_flash()
-    PAGES[ss.page]()
-
-
-main()
+            ok = st.form_submit_button("Сохранить имя", type="prim
