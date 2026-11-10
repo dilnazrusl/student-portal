@@ -1,0 +1,16 @@
+[theme]
+primaryColor = "#FF5FA2"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#FFD6E8"
+textColor = "#333333"
+font = "sans serif"
+
+[server]
+# максимальный размер загружаемого файла в МБ (то же число — MAX_FILE_MB в constants.py)
+maxUploadSize = 5
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
