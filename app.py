@@ -861,4 +861,485 @@ def p_it_profile():
     with st.expander("Изменить имя"):
         with st.form("edit_name"):
             new_name = st.text_input("Правильное имя и фамилия", value=profile["name"])
-            ok = st.form_submit_button("Сохранить имя", type="prim
+            ok = st.form_submit_button("Сохранить имя", type="primary")
+        if ok:
+            try:
+                changed = db_it.update_name(ss.user, kind, person["id"], new_name)
+            except Exception as exc:
+                show_error(exc)
+            else:
+                if changed:
+                    flash("success", "Имя исправлено. Изменение записано в журнал.")
+                refresh()
+
+    with st.expander("Изменить пароль"):
+        st.caption(PASSWORD_RULES_TEXT)
+        with st.form("edit_password"):
+            new_pw = st.text_input(f"Новый пароль для {profile['name']}")
+            ok = st.form_submit_button("Сохранить пароль", type="primary")
+        if ok:
+            try:
+                db_it.change_password(ss.user, kind, person["id"], new_pw.strip())
+            except Exception as exc:
+                show_error(exc)
+            else:
+                flash("success", "Пароль изменён. Действие записано в журнал.")
+                refresh()
+
+
+def p_it_history():
+    person = ss.ctx.get("it_person")
+    back_bar("← Назад", "it_menu")
+    if not person:
+        return
+    title("История")
+    subtitle(f"{person['name']} · {KIND_LABELS[person['kind']]} · нажми на строку, чтобы увидеть всё",
+             gray=True)
+    events = q("history", db_it.get_history, person["kind"], person["id"], default=[])
+    if not events:
+        subtitle("Пока нет записей.", gray=True)
+        return
+    for i, e in enumerate(events):
+        label = f"{fmt_dt(e['time'])} — {md(e['title'])}" + (f" · {md(e['short'])}" if e["short"] else "")
+        with st.expander(label):
+            st.markdown(f'<div class="detail">{esc(e["details"])}</div>', unsafe_allow_html=True)
+
+
+def p_it_inst_students():
+    person = ss.ctx.get("it_person")
+    back_bar("← Назад", "it_profile")
+    if not person:
+        return
+    title("Студенты преподавателя")
+    students = q("inst_students", db_it.get_instructor_students, person["id"], default=[])
+    subtitle(f"{person['name']} · всего студентов: {len({s['id'] for s in students})}", gray=True)
+    if not students:
+        subtitle("У этого преподавателя пока нет студентов.", gray=True)
+        return
+    grid_table(["ID", "Имя и фамилия", "Курс обучения", "Предмет"],
+               [(s["id"], s["name"], f"{s['course_year']} курс" if s["course_year"] else "—", s["course"])
+                for s in students])
+
+
+# ============================================== финансы (общий кусок) ==========
+
+def render_finance(fin):
+    """Финансовый кабинет: цена кредита, курсы, итоги, оплаты. Один вид для студента и бухгалтера."""
+    paid_form = fin["funding"] == "paid"
+    subtitle(f"1 кредит = {kzt(fin['credit_price'])}. Стоимость курса = кредиты × цена кредита.", gray=True)
+    badge(f"Форма обучения: {FUNDING_RU.get(fin['funding'], fin['funding'])}")
+    if fin["courses"]:
+        grid_table(["Код", "Курс", "Кредиты", "Стоимость", "Семестр"],
+                   [(x["course_code"], x["course_name"], x["credits"], kzt(x["price"]), x["semester"])
+                    for x in fin["courses"]])
+    else:
+        subtitle("Пока нет курсов.", gray=True)
+
+    if not paid_form:
+        info_table([("Стоимость курсов", kzt(fin["total"])), ("Покрывается грантом", kzt(fin["total"])),
+                    ("К оплате", kzt(0))])
+        st.markdown(chip("ok", "Оплата не требуется"), unsafe_allow_html=True)
+        return
+    info_table([("Стоимость курсов", kzt(fin["total"])), ("Оплачено", kzt(fin["paid"])),
+                ("Остаток к оплате", kzt(fin["debt"]))])
+    st.markdown(chip("ok", "Всё оплачено") if fin["debt"] == 0 and fin["total"] > 0
+                else chip("bad", f"Долг: {kzt(fin['debt'])}") if fin["debt"] > 0
+                else chip("wait", "Курсов пока нет"), unsafe_allow_html=True)
+    section("Оплаты")
+    if fin["payments"]:
+        grid_table(["Дата", "Сумма", "Способ", "Комментарий"],
+                   [(fmt_dt(p["paid_at"]), kzt(p["amount"]), p["method"], p["note"] or "—")
+                    for p in fin["payments"]])
+    else:
+        subtitle("Оплат пока нет.", gray=True)
+
+
+# =============================================== студент: файлы и финансы ====
+
+def p_student_materials():
+    sid = ss.user["student_id"]
+    back_bar("← Назад", "student_home")
+    title("Материалы курсов")
+    subtitle("Здесь только файлы тех курсов, на которые ты записан.", gray=True)
+    items = q("mats", db_files.list_student_materials, sid, default=[])
+    if not items:
+        subtitle("Пока преподаватели ничего не загрузили.", gray=True)
+        return
+    by_course = {}
+    for m in items:
+        by_course.setdefault((m["course_code"], m["course_name"]), []).append(m)
+    for (code, name), mats in by_course.items():
+        with st.expander(f"{md(code)} — {md(name)} · файлов: {len(mats)}", expanded=True):
+            for m in mats:
+                st.markdown(f"**{md(m['title'])}**  \n{md(m['file_name'])} · {fmt_size(m['size'])} · "
+                            f"{fmt_dt(m['uploaded_at'])} · {md(m['instructor'])}")
+                file_button("Скачать", f"dl_m_{m['material_id']}", db_files.open_material,
+                            "student", sid, m["material_id"], file_name=m["file_name"])
+
+
+def p_student_homework():
+    sid = ss.user["student_id"]
+    back_bar("← Назад", "student_home")
+    title("Домашние задания")
+    subtitle(f"Зелёный — сдано вовремя, красный — опоздал или срок прошёл. "
+             f"Файл до {MAX_FILE_MB} МБ.", gray=True)
+    status = q("sstatus", db.get_student_status, sid, default=ss.user.get("status"))
+    items = q("hw", db_files.list_student_assignments, sid, default=[])
+    if not items:
+        subtitle("Заданий пока нет.", gray=True)
+        return
+    if status != "Active":
+        st.info("Сдавать работы можно только при статусе «Активный».")
+    for a in items:
+        kind, text = hw_status(a["deadline"], a["submission_id"], a["on_time"])
+        with st.container(border=True):
+            st.markdown(f'<div><b>{esc(a["title"])}</b><br><span style="color:{c.GRAY_TEXT}">'
+                        f'{esc(a["course_code"])} — {esc(a["course_name"])}</span></div>'
+                        f'<div style="margin:.4rem 0">Срок: <b>{esc(fmt_dt(a["deadline"]))}</b> &nbsp; '
+                        f'{chip(kind, text)}</div>', unsafe_allow_html=True)
+            if a["description"]:
+                st.markdown(f'<div class="detail">{esc(a["description"])}</div>', unsafe_allow_html=True)
+            if a["submission_id"]:
+                st.caption(f"Сдано: {fmt_dt(a['submitted_at'])} · {a['file_name']}")
+                file_button("Скачать мою работу", f"dl_s_{a['submission_id']}", db_files.open_submission,
+                            "student", sid, a["submission_id"], file_name=a["file_name"])
+            if status == "Active":
+                with st.form(f"hw_form_{a['assignment_id']}"):
+                    up = st.file_uploader(f"Файл ({', '.join(ALLOWED_TYPES['homework'])})",
+                                          type=ALLOWED_TYPES["homework"],
+                                          key=upload_key(f"hw_{a['assignment_id']}"))
+                    sent = st.form_submit_button("Заменить работу" if a["submission_id"] else "Сдать",
+                                                 type="primary")
+                if sent:
+                    if up is None:
+                        st.warning("Сначала выбери файл.")
+                    else:
+                        try:
+                            db_files.submit_homework(sid, a["assignment_id"], up.name, up.getvalue())
+                        except Exception as exc:
+                            show_error(exc)
+                        else:
+                            flash("success", "Работа сдана." if not a["submission_id"] else "Работа заменена.")
+                            bump_upload()
+                            refresh()
+
+
+def p_student_finance():
+    sid = ss.user["student_id"]
+    back_bar("← Назад", "student_home")
+    title("Финансы")
+    fin = q("fin", db_finance.student_finance, sid)
+    if fin is None:
+        return
+    render_finance(fin)
+    if fin["funding"] != "paid":
+        return
+
+    section("Чеки об оплате")
+    subtitle(f"Приложи чек (pdf, png, jpg, до {MAX_FILE_MB} МБ) — бухгалтерия его увидит.", gray=True)
+    with st.form("receipt_form"):
+        up = st.file_uploader("Файл чека", type=ALLOWED_TYPES["receipt"], key=upload_key("receipt"))
+        sent = st.form_submit_button("Прикрепить чек", type="primary")
+    if sent:
+        if up is None:
+            st.warning("Сначала выбери файл.")
+        else:
+            try:
+                db_finance.add_receipt(sid, up.name, up.getvalue())
+            except Exception as exc:
+                show_error(exc)
+            else:
+                flash("success", "Чек прикреплён.")
+                bump_upload()
+                refresh()
+    receipts = q("receipts", db_finance.list_receipts, sid, default=[])
+    for r in receipts:
+        with st.container(border=True):
+            st.markdown(f"**{md(r['file_name'])}** · {fmt_size(r['size'])} · {fmt_dt(r['uploaded_at'])}  \n"
+                        + ("✅ учтён бухгалтерией" if r["used"] else "⏳ ждёт проверки"))
+            file_button("Скачать", f"dl_r_{r['receipt_id']}", db_finance.open_receipt,
+                        "student", sid, r["receipt_id"], file_name=r["file_name"])
+            if not r["used"]:
+                if st.button("Удалить чек", key=f"del_r_{r['receipt_id']}"):
+                    try:
+                        db_finance.delete_receipt(sid, r["receipt_id"])
+                    except Exception as exc:
+                        show_error(exc)
+                    else:
+                        refresh()
+
+
+# ========================================== преподаватель: файлы и задания ====
+
+def _instructor_course_picker(key):
+    """Общая шапка: список курсов преподавателя + можно ли ему менять данные."""
+    ins = ss.user
+    courses = q("courses", db.get_instructor_courses, ins["instructor_id"], default=[])
+    status = q("istatus", db.get_instructor_status, ins["instructor_id"], default=ins.get("status"))
+    can_edit = status == ACTIVE_INSTRUCTOR
+    if not courses:
+        subtitle("У вас пока нет предметов.", gray=True)
+        return None, can_edit, status
+    labels = [f"{x['course_code']} — {x['course_name']}" for x in courses]
+    choice = st.selectbox("Предмет", labels, key=key)
+    return courses[labels.index(choice)]["course_code"], can_edit, status
+
+
+def p_instructor_materials():
+    ins = ss.user
+    back_bar("← Назад", "instructor_home")
+    title("Материалы курса")
+    code, can_edit, status = _instructor_course_picker("mat_course")
+    if code is None:
+        return
+    if can_edit:
+        subtitle(f"Файлы увидят только студенты этого курса. До {MAX_FILE_MB} МБ.", gray=True)
+        with st.form("material_form"):
+            name = st.text_input("Название материала", placeholder="Например: Лекция 2 — SQL")
+            up = st.file_uploader(f"Файл ({', '.join(ALLOWED_TYPES['material'])})",
+                                  type=ALLOWED_TYPES["material"], key=upload_key("material"))
+            sent = st.form_submit_button("Загрузить", type="primary")
+        if sent:
+            if up is None:
+                st.warning("Сначала выбери файл.")
+            else:
+                try:
+                    db_files.add_material(ins["instructor_id"], code, name, up.name, up.getvalue())
+                except Exception as exc:
+                    show_error(exc)
+                else:
+                    flash("success", "Материал загружен.")
+                    bump_upload()
+                    refresh()
+    else:
+        subtitle(f"Статус: {status_label('instructor', status)}. Режим просмотра — загружать нельзя.", gray=True)
+
+    mats = q(f"mats_{code}", db_files.list_course_materials, code, default=[])
+    if not mats:
+        subtitle("Материалов пока нет.", gray=True)
+        return
+    pending = ss.confirm
+    for m in mats:
+        with st.container(border=True):
+            st.markdown(f"**{md(m['title'])}**  \n{md(m['file_name'])} · {fmt_size(m['size'])} · "
+                        f"{fmt_dt(m['uploaded_at'])}")
+            file_button("Скачать", f"dl_m_{m['material_id']}", db_files.open_material,
+                        "instructor", ins["instructor_id"], m["material_id"], file_name=m["file_name"])
+            if can_edit:
+                if pending == ("mdel", m["material_id"]):
+                    st.warning("Удалить этот файл у всех студентов?")
+                    col1, col2 = st.columns(2)
+                    if col1.button("Да, удалить", key=f"mdel_yes_{m['material_id']}", type="primary"):
+                        try:
+                            db_files.delete_material(ins["instructor_id"], m["material_id"])
+                        except Exception as exc:
+                            show_error(exc)
+                        else:
+                            ss.confirm = None
+                            refresh()
+                    col2.button("Отмена", key=f"mdel_no_{m['material_id']}", on_click=clear_confirm)
+                else:
+                    st.button("Удалить", key=f"mdel_{m['material_id']}", on_click=set_confirm,
+                              args=(("mdel", m["material_id"]),))
+
+
+def p_instructor_homework():
+    ins = ss.user
+    back_bar("← Назад", "instructor_home")
+    title("Домашние задания")
+    code, can_edit, status = _instructor_course_picker("hw_course")
+    if code is None:
+        return
+
+    if can_edit:
+        with st.expander("Новое задание"):
+            with st.form("assignment_form"):
+                name = st.text_input("Название задания")
+                desc = st.text_area("Описание (необязательно)")
+                local_now = utc_now() + timedelta(hours=TZ_OFFSET_HOURS)
+                day = st.date_input("Срок сдачи — дата", value=local_now.date() + timedelta(days=7))
+                hour = st.time_input("Срок сдачи — время", value=dtime(23, 59))
+                sent = st.form_submit_button("Создать задание", type="primary")
+            if sent:
+                deadline_utc = datetime.combine(day, hour) - timedelta(hours=TZ_OFFSET_HOURS)
+                try:
+                    db_files.create_assignment(ins["instructor_id"], code, name, desc, deadline_utc)
+                except Exception as exc:
+                    show_error(exc)
+                else:
+                    flash("success", "Задание создано.")
+                    refresh()
+    else:
+        subtitle(f"Статус: {status_label('instructor', status)}. Режим просмотра.", gray=True)
+
+    items = q(f"asg_{code}", db_files.list_course_assignments, ins["instructor_id"], code, default=[])
+    if not items:
+        subtitle("Заданий по этому курсу пока нет.", gray=True)
+        return
+    idx = st.selectbox("Задание", range(len(items)), key=f"asg_pick_{code}",
+                       format_func=lambda k: f"{items[k]['title']} · срок {fmt_dt(items[k]['deadline'])}")
+    a = items[idx]
+    badge(f"Сдали: {a['submitted']} из {a['students']} · вовремя: {a['on_time']}")
+    if a["description"]:
+        st.markdown(f'<div class="detail">{esc(a["description"])}</div>', unsafe_allow_html=True)
+
+    rows = q(f"ov_{a['assignment_id']}", db_files.assignment_overview, ins["instructor_id"],
+             a["assignment_id"], default=[])
+    table = []
+    for r in rows:
+        if r["submission_id"]:
+            kind, text = hw_status(a["deadline"], r["submission_id"], r["on_time"])
+        elif a["deadline"] <= utc_now():
+            kind, text = "bad", "Не сдал"
+        else:
+            kind, text = "wait", "Ожидается"
+        table.append((r["student_id"], r["name"], chip(kind, text), fmt_dt(r["submitted_at"])))
+    if table:
+        grid_table(["ID", "Студент", "Статус", "Когда сдал"], table, raw=(2,))
+    done = [r for r in rows if r["submission_id"]]
+    if done:
+        who = st.selectbox("Скачать работу студента", range(len(done)), key=f"dl_pick_{a['assignment_id']}",
+                           format_func=lambda k: f"{done[k]['student_id']} · {done[k]['name']} · "
+                                                 f"{done[k]['file_name']}")
+        r = done[who]
+        file_button("Скачать работу", f"dl_s_{r['submission_id']}", db_files.open_submission,
+                    "instructor", ins["instructor_id"], r["submission_id"], file_name=r["file_name"])
+    if can_edit:
+        if ss.confirm == ("adel", a["assignment_id"]):
+            st.warning("Удалить задание вместе со всеми сданными работами?")
+            col1, col2 = st.columns(2)
+            if col1.button("Да, удалить", key="adel_yes", type="primary"):
+                try:
+                    db_files.delete_assignment(ins["instructor_id"], a["assignment_id"])
+                except Exception as exc:
+                    show_error(exc)
+                else:
+                    ss.confirm = None
+                    refresh()
+            col2.button("Отмена", key="adel_no", on_click=clear_confirm)
+        else:
+            st.button("Удалить задание", key="adel", on_click=set_confirm, args=(("adel", a["assignment_id"]),))
+
+
+# ================================================================ бухгалтерия ====
+
+def p_acc_list():
+    staff = ss.user
+    back_bar("← Выйти")
+    title("Студенты")
+    subtitle(f"{staff['name']} · {DEPARTMENTS.get(staff['department'], staff['department'])}", gray=True)
+    students = q("fin_list", db_finance.list_students_finance, default=[])
+    query = search_box()
+    found = [s for s in students if matches(query, s["id"], s["name"])]
+    if not found:
+        subtitle("Никого не найдено.", gray=True)
+        return
+    row_list([(f"{s['id']}  ·  {md(s['name'])}  ·  {FUNDING_RU.get(s['funding'])}"
+               + (f"  ·  долг {kzt(s['debt'])}" if s["funding"] == "paid" and s["debt"] > 0 else ""),
+               "acc_student", {"acc_student": {"id": s["id"], "name": s["name"]}}) for s in found])
+
+
+def p_acc_student():
+    staff = ss.user
+    student = ss.ctx.get("acc_student")
+    back_bar("← Назад", "acc_list")
+    if not student:
+        return
+    fin = q("fin", db_finance.student_finance, student["id"])
+    if fin is None:
+        st.warning("Студент не найден.")
+        return
+    title(fin["name"])
+    subtitle(f"ID {fin['student_id']}", gray=True)
+    render_finance(fin)
+    if fin["funding"] != "paid":
+        return
+
+    receipts = q("receipts", db_finance.list_receipts, student["id"], default=[])
+    section("Чеки студента")
+    if not receipts:
+        subtitle("Студент пока не прикладывал чеки.", gray=True)
+    for r in receipts:
+        with st.container(border=True):
+            st.markdown(f"**{md(r['file_name'])}** · {fmt_size(r['size'])} · {fmt_dt(r['uploaded_at'])}  \n"
+                        + ("✅ учтён" if r["used"] else "⏳ ещё не учтён"))
+            file_button("Скачать", f"dl_r_{r['receipt_id']}", db_finance.open_receipt,
+                        "staff", staff["staff_id"], r["receipt_id"], staff["department"],
+                        file_name=r["file_name"])
+
+    section("Записать оплату")
+    with st.form(f"payment_form_{student['id']}"):
+        amount = st.number_input("Сумма, ₸", min_value=0.0, step=1000.0, format="%.0f",
+                                 value=float(fin["debt"]) if fin["debt"] else None)
+        method = st.selectbox("Способ оплаты", range(len(PAYMENT_METHODS)),
+                              format_func=lambda k: PAYMENT_METHODS[k][1])
+        free = [r for r in receipts if not r["used"]]
+        pick = st.selectbox("Привязать чек (необязательно)", range(-1, len(free)), index=0,
+                            format_func=lambda k: "— без чека —" if k < 0 else
+                            f"{free[k]['file_name']} · {fmt_dt(free[k]['uploaded_at'])}")
+        note = st.text_input("Комментарий (необязательно)")
+        sent = st.form_submit_button("Записать оплату", type="primary")
+    if sent:
+        if not amount:
+            st.warning("Введи сумму оплаты.")
+        else:
+            try:
+                db_finance.add_payment(staff, student["id"], amount, PAYMENT_METHODS[method][0], note,
+                                       free[pick]["receipt_id"] if pick >= 0 else None)
+            except Exception as exc:
+                show_error(exc)
+            else:
+                flash("success", f"Оплата записана: {kzt(amount)}.")
+                refresh()
+
+
+# ============================================================== маршрутизация ==
+
+PAGES = {
+    "login": p_login,
+    "student_home": p_student_home, "student_info": p_student_info, "student_grades": p_student_grades,
+    "student_materials": p_student_materials, "student_homework": p_student_homework,
+    "student_finance": p_student_finance,
+    "instructor_home": p_instructor_home, "instructor_info": p_instructor_info,
+    "instructor_subject": p_instructor_subject, "instructor_materials": p_instructor_materials,
+    "instructor_homework": p_instructor_homework,
+    "acc_list": p_acc_list, "acc_student": p_acc_student,
+    "hr_home": p_hr_home, "hr_add_student": p_hr_add_student, "hr_add_instructor": p_hr_add_instructor,
+    "status_role": p_status_role, "status_list": p_status_list, "status_edit": p_status_edit,
+    "reg_list": p_reg_list, "reg_student": p_reg_student,
+    "it_home": p_it_home,
+    "it_students": lambda: p_it_list("student"),
+    "it_instructors": lambda: p_it_list("instructor"),
+    "it_staff": lambda: p_it_list("staff"),
+    "it_menu": p_it_menu, "it_profile": p_it_profile, "it_history": p_it_history,
+    "it_inst_students": p_it_inst_students,
+}
+
+
+def allowed(page):
+    """Страница доступна только своей роли (и своему департаменту у сотрудников)."""
+    if page == "login":
+        return True
+    if ss.user is None:
+        return False
+    if page.startswith("student_"):
+        return ss.role == "student"
+    if page.startswith("instructor_"):
+        return ss.role == "instructor"
+    dep = {"hr_": "HR", "status_": "HR", "reg_": "Registrar", "it_": "IT", "acc_": "Accounting"}
+    for prefix, department in dep.items():
+        if page.startswith(prefix):
+            return ss.role == "staff" and ss.user["department"] == department
+    return False
+
+
+def main():
+    _init()
+    if ss.page not in PAGES or not allowed(ss.page):
+        ss.page = "login"
+    inject_css(ss.page in PINK_PAGES)
+    show_flash()
+    PAGES[ss.page]()
+
+
+main()
