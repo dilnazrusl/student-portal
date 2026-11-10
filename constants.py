@@ -41,9 +41,10 @@ DEPARTMENTS = {
     "HR": "HR-департамент",
     "Registrar": "Офис регистратора",
     "IT": "IT-департамент",
+    "Accounting": "Бухгалтерия",
 }
 
-DEPARTMENTS_SHORT = {"HR": "HR", "Registrar": "Регистратор", "IT": "IT"}
+DEPARTMENTS_SHORT = {"HR": "HR", "Registrar": "Регистратор", "IT": "IT", "Accounting": "Бухгалтерия"}
 
 KIND_LABELS = {"student": "Студент", "instructor": "Преподаватель", "staff": "Сотрудник"}
 KIND_PLURAL = {"student": "Студенты", "instructor": "Преподаватели", "staff": "Сотрудники"}
@@ -75,6 +76,8 @@ ACTION_LABELS = {
     "REMOVE_COURSE": "У студента удалён курс",
     "EDIT_NAME": "Исправлено имя",
     "CHANGE_PASSWORD": "Изменён пароль",
+    "ADD_PAYMENT": "Записана оплата",
+    "SET_FUNDING": "Изменена форма обучения",
 }
 
 WEEKDAYS_RU = [
@@ -86,3 +89,21 @@ PASSWORD_RULES_TEXT = (
     "Пароль: минимум 8 символов, хотя бы 1 заглавная (A–Z), 1 строчная (a–z),\n"
     "1 цифра (0–9) и 1 спецсимвол (! @ # $ %)."
 )
+
+
+# ---- Финансы и файлы (веб-версия) ----
+FUNDING = [("paid", "Платное"), ("grant", "Грант")]   # форма обучения студента
+FUNDING_RU = dict(FUNDING)
+
+PAYMENT_METHODS = [("Kaspi", "Kaspi"), ("Card", "Банковская карта"),
+                   ("Cash", "Наличные"), ("Transfer", "Банковский перевод")]
+PAYMENT_METHOD_RU = dict(PAYMENT_METHODS)
+
+MAX_FILE_MB = 5   # максимальный размер ЛЮБОГО файла (для всех ролей); тот же лимит в .streamlit/config.toml
+
+# какие расширения можно загружать
+ALLOWED_TYPES = {
+    "material": ["pdf", "docx", "pptx", "txt", "png", "jpg", "jpeg"],
+    "homework": ["pdf", "docx", "txt", "zip", "png", "jpg", "jpeg"],
+    "receipt": ["pdf", "png", "jpg", "jpeg"],
+}
