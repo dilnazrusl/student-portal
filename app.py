@@ -11,16 +11,19 @@ app.py
 import html
 import mimetypes
 import os
+import re
 from datetime import date, datetime, time as dtime, timedelta, timezone
 
 import streamlit as st
 
 import colors as c
 import db
+import db_ai
 import db_files
 import db_finance
 import db_hr
 import db_it
+import db_nlp
 import db_registrar
 from constants import (ACTIVE_INSTRUCTOR, ALLOWED_TYPES, DEPARTMENTS, DEPARTMENTS_SHORT, FUNDING,
                        FUNDING_RU, KIND_LABELS, KIND_PLURAL, MAX_COURSES, MAX_FILE_MB,
@@ -372,7 +375,7 @@ def p_student_home():
     home(u["name"], [f"Текущая учебная неделя: {get_academic_week()}"],
          [("Личная информация", "student_info"), ("Оценки", "student_grades"),
           ("Материалы курсов", "student_materials"), ("Домашние задания", "student_homework"),
-          ("Финансы", "student_finance")])
+          ("Финансы", "student_finance"), ("Умный поиск", "student_search")])
 
 
 def p_student_info():
@@ -421,7 +424,8 @@ def p_instructor_home():
     home(u["name"], [f"Текущая учебная неделя: {get_academic_week(today)}",
                      f"Сегодня: {WEEKDAYS_RU[today.weekday()]}"],
          [("Личная информация", "instructor_info"), ("Предмет", "instructor_subject"),
-          ("Материалы курса", "instructor_materials"), ("Домашние задания", "instructor_homework")])
+          ("Материалы курса", "instructor_materials"), ("Домашние задания", "instructor_homework"),
+          ("Умный поиск", "instructor_search")])
 
 
 def p_instructor_info():
@@ -785,7 +789,8 @@ def p_it_home():
     staff = ss.user
     home(staff["name"], [DEPARTMENTS.get(staff["department"], staff["department"]),
                          f"Текущая учебная неделя: {get_academic_week()}"],
-         [("Студенты", "it_students"), ("Преподаватели", "it_instructors"), ("Сотрудники", "it_staff")])
+         [("Студенты", "it_students"), ("Преподаватели", "it_instructors"), ("Сотрудники", "it_staff"),
+          ("AI-помощник", "it_assistant")])
 
 
 def _it_row_label(kind, p):
@@ -1228,6 +1233,7 @@ def p_acc_list():
     back_bar("← Выйти")
     title("Студенты")
     subtitle(f"{staff['name']} · {DEPARTMENTS.get(staff['department'], staff['department'])}", gray=True)
+    st.button("AI-помощник", key="nav_acc_ai", on_click=go, args=("acc_assistant",))
     students = q("fin_list", db_finance.list_students_finance, default=[])
     query = search_box()
     found = [s for s in students if matches(query, s["id"], s["name"])]
@@ -1295,11 +1301,142 @@ def p_acc_student():
 
 # ============================================================== маршрутизация ==
 
+# ================================================= умный поиск и AI-помощник ====
+
+AI_QUESTION_LIMIT = 30      # вопросов к AI за один вход (защита от лишних расходов)
+
+SEARCH_CSS = f"""<style>
+.hit {{background:{c.WHITE}; border:1px solid {c.GRAY_LINE}; border-radius:10px;
+  padding:.7rem .9rem; margin-bottom:.6rem;}}
+.hit .t {{font-weight:700; margin:.25rem 0 .1rem;}}
+.hit .m {{color:{c.GRAY_TEXT}; font-size:.88rem;}}
+.hit .b {{font-size:.92rem; margin-top:.2rem;}}
+.hit mark {{background:{c.PINK_BG}; color:{c.TEXT_DARK}; padding:0 .1rem; border-radius:3px;}}
+.ai-ans {{background:{c.WHITE}; border-left:4px solid {c.PINK_MAIN}; border-radius:8px;
+  padding:.7rem .9rem; margin:.4rem 0 .8rem;}}
+</style>"""
+
+
+def _hl(text, words):
+    """Экранирует текст и подсвечивает слова запроса."""
+    text = text or ""
+    if not words:
+        return esc(text)
+    rx = re.compile("(" + "|".join(re.escape(w) + r"\w*" for w in words) + ")", re.IGNORECASE)
+    return "".join(f"<mark>{esc(p)}</mark>" if i % 2 else esc(p) for i, p in enumerate(rx.split(text)))
+
+
+def render_search(back_page):
+    uid = ss.user["student_id"] if ss.role == "student" else ss.user["instructor_id"]
+    back_bar("← Назад", back_page)
+    title("Умный поиск")
+    subtitle("Ищи по курсам, материалам и заданиям. Понимает формы слов, опечатки и синонимы: "
+             "например, «базы данных» найдёт Database Systems.", gray=True)
+    query = st.text_input("Поиск", placeholder="🔍 Например: базы данных, задание, алгоритмы",
+                          key="nlp_q", label_visibility="collapsed").strip()
+    if len(query) < 2:
+        return
+    results = q(f"nlp:{query}", db_nlp.search, query, ss.role, uid, default=[])
+    if not results:
+        subtitle("Ничего не нашлось. Попробуй другое слово.", gray=True)
+        return
+    words = db_nlp.highlight_words(query)
+    st.markdown(SEARCH_CSS, unsafe_allow_html=True)
+    cards = []
+    for r in results:
+        body = r["body"][:140] + ("…" if len(r["body"]) > 140 else "")
+        note = "" if r["mine"] else " · не твой курс"
+        cards.append(
+            f'<div class="hit">{chip("wait", r["label"])}'
+            f'<div class="t">{_hl(r["title"], words)}</div>'
+            f'<div class="m">{esc(r["course_code"])} · {esc(r["course_name"])}{note}</div>'
+            + (f'<div class="b">{_hl(body, words)}</div>' if body else "") + "</div>")
+    st.markdown(f"**Найдено: {len(results)}**")
+    st.markdown("".join(cards), unsafe_allow_html=True)
+
+
+def _cell(v):
+    return "—" if v is None else (f"{float(v):g}" if hasattr(v, "as_tuple") else str(v))
+
+
+def _is_num(v):
+    return isinstance(v, (int, float)) or hasattr(v, "as_tuple")
+
+
+def _show_ai_item(item):
+    res = item["res"]
+    st.markdown(f"**{md(item['q'])}**")
+    st.markdown(f'<div class="ai-ans">{esc(res["answer"])}</div>', unsafe_allow_html=True)
+    cols, rows = res["columns"], res["rows"]
+    if rows:
+        grid_table(cols, [[_cell(v) for v in r] for r in rows[:50]])
+        if len(rows) > 50:
+            st.caption(f"Показаны первые 50 из {len(rows)} строк.")
+        if len(cols) == 2 and 2 <= len(rows) <= 30 and all(_is_num(r[1]) for r in rows if r[1] is not None):
+            import pandas as pd
+            df = pd.DataFrame({cols[1]: [float(r[1]) if r[1] is not None else 0 for r in rows]},
+                              index=[str(r[0]) for r in rows])
+            st.bar_chart(df, color=c.PINK_MAIN)
+    with st.expander("Показать SQL-запрос"):
+        st.code(res["sql"], language="sql")
+
+
+def render_assistant(back_page):
+    dep = ss.user["department"]
+    back_bar("← Назад", back_page)
+    title("AI-помощник")
+    subtitle("Спроси обычными словами, помощник сам составит запрос к базе. "
+             "Он только читает данные и не видит паролей и ИИН.", gray=True)
+    if not db_ai.available(dep):
+        subtitle("Для твоего отдела помощник не подключён.", gray=True)
+        return
+    ss.setdefault("ai_hist", [])
+    ss.setdefault("ai_count", 0)
+    with st.form("ai_form", clear_on_submit=True):
+        question = st.text_input("Вопрос", placeholder="Например: " + db_ai.examples(dep)[0],
+                                 label_visibility="collapsed")
+        sent = st.form_submit_button("Спросить", type="primary")
+    if not ss.ai_hist:
+        subtitle(["Примеры вопросов:"] + ["• " + e for e in db_ai.examples(dep)], gray=True)
+    if sent and question.strip():
+        if ss.ai_count >= AI_QUESTION_LIMIT:
+            st.warning(f"Лимит {AI_QUESTION_LIMIT} вопросов за один вход. Войди заново, чтобы продолжить.")
+        else:
+            with st.spinner("Думаю…"):
+                try:
+                    res = db_ai.ask(dep, question)
+                    ss.ai_count += 1
+                    ss.ai_hist.insert(0, {"q": question.strip(), "res": res})
+                except Exception as exc:
+                    show_error(exc)
+    st.markdown(SEARCH_CSS, unsafe_allow_html=True)
+    for item in ss.ai_hist[:5]:
+        _show_ai_item(item)
+
+
+def p_student_search():
+    render_search("student_home")
+
+
+def p_instructor_search():
+    render_search("instructor_home")
+
+
+def p_it_assistant():
+    render_assistant("it_home")
+
+
+def p_acc_assistant():
+    render_assistant("acc_list")
+
+
 PAGES = {
     "login": p_login,
     "student_home": p_student_home, "student_info": p_student_info, "student_grades": p_student_grades,
     "student_materials": p_student_materials, "student_homework": p_student_homework,
-    "student_finance": p_student_finance,
+    "student_finance": p_student_finance, "student_search": p_student_search,
+    "instructor_search": p_instructor_search, "it_assistant": p_it_assistant,
+    "acc_assistant": p_acc_assistant,
     "instructor_home": p_instructor_home, "instructor_info": p_instructor_info,
     "instructor_subject": p_instructor_subject, "instructor_materials": p_instructor_materials,
     "instructor_homework": p_instructor_homework,
