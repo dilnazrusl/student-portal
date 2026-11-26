@@ -10,7 +10,11 @@ AI-помощник для сотрудников (IT и бухгалтерия)
   3) транзакция READ ONLY, лимит времени 5 секунд, максимум 200 строк;
   4) перед запуском SQL проверяется: один оператор, только SELECT/WITH, без комментариев и
      опасных слов.
-Ключ Claude API берётся из Secrets: ANTHROPIC_API_KEY (модель можно сменить в AI_MODEL).
+
+Модель — Claude через API (нужен секрет ANTHROPIC_API_KEY). Выбор провайдера:
+  AI_PROVIDER = "anthropic" | "ollama"  (если не задан: есть ANTHROPIC_API_KEY -> Claude, иначе Ollama)
+  AI_MODEL    = имя модели (для Claude по умолчанию claude-sonnet-5-5).
+Ollama (локальная модель) оставлена как запасной вариант: OLLAMA_URL = адрес Ollama.
 """
 
 import json
@@ -19,6 +23,7 @@ import re
 from db_core import _get, get_connection
 
 MODEL_DEFAULT = "claude-sonnet-5-5"
+OLLAMA_MODEL_DEFAULT = "qwen2.5:7b"
 MAX_ROWS = 200
 
 TABLE_DOCS = {
@@ -91,10 +96,44 @@ def _client():
     return anthropic.Anthropic(api_key=key)
 
 
-def _call(system, messages, max_tokens=700):
-    resp = _client().messages.create(model=_get("AI_MODEL", MODEL_DEFAULT), max_tokens=max_tokens,
-                                     system=system, messages=messages)
-    return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+def _call_ollama(system, messages, max_tokens, json_mode):
+    import urllib.error
+    import urllib.request
+    body = {"model": _get("AI_MODEL", OLLAMA_MODEL_DEFAULT), "stream": False,
+            "messages": [{"role": "system", "content": system}] + messages,
+            "options": {"temperature": 0, "num_predict": max_tokens}}
+    if json_mode:
+        body["format"] = "json"
+    url = _get("OLLAMA_URL", "http://localhost:11434").rstrip("/") + "/api/chat"
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=240) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise ValueError("Локальная модель ещё не скачана. Подожди окончания загрузки "
+                             "и попробуй снова.")
+        raise ValueError(f"Локальная модель вернула ошибку {exc.code}.")
+    except (urllib.error.URLError, OSError):
+        raise ValueError("Локальная модель не отвечает. Проверь, что запущен Ollama "
+                         "или задай ANTHROPIC_API_KEY, чтобы использовать Claude.")
+    return (data.get("message", {}).get("content") or "").strip()
+
+
+def _provider():
+    explicit = (_get("AI_PROVIDER", "") or "").strip().lower()
+    if explicit in ("anthropic", "ollama"):
+        return explicit
+    return "anthropic" if _get("ANTHROPIC_API_KEY") else "ollama"
+
+
+def _call(system, messages, max_tokens=700, json_mode=False):
+    if _provider() == "anthropic":
+        resp = _client().messages.create(model=_get("AI_MODEL", MODEL_DEFAULT), max_tokens=max_tokens,
+                                         system=system, messages=messages)
+        return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+    return _call_ollama(system, messages, max_tokens, json_mode)
 
 
 def _system_prompt(department):
@@ -163,7 +202,7 @@ def ask(department, question):
     cols = rows = sql = None
     last_error = None
     for _attempt in range(2):                       # одна попытка исправить ошибку SQL
-        data = _parse_json(_call(system, messages))
+        data = _parse_json(_call(system, messages, json_mode=True))
         if data.get("refuse"):
             raise ValueError(str(data["refuse"]))
         sql = data.get("sql", "")
