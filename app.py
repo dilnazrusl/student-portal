@@ -25,12 +25,13 @@ import db_hr
 import db_it
 import db_nlp
 import db_registrar
+import db_schedule
 from constants import (ACTIVE_INSTRUCTOR, ALLOWED_TYPES, DEPARTMENTS, DEPARTMENTS_SHORT, FUNDING,
                        FUNDING_RU, KIND_LABELS, KIND_PLURAL, MAX_COURSES, MAX_FILE_MB,
                        PASSWORD_RULES_TEXT, PAYMENT_METHODS, RELATIONSHIP_RU, RELATIONSHIPS,
                        STATUSES, WEEKDAYS_RU, status_label)
 from db_core import _get
-from utils import format_grade, get_academic_week, matches
+from utils import current_semester, format_grade, get_academic_week, matches
 
 st.set_page_config(page_title="Student Portal", page_icon="🎓", layout="centered",
                    initial_sidebar_state="collapsed")
@@ -375,7 +376,8 @@ def p_student_home():
     home(u["name"], [f"Текущая учебная неделя: {get_academic_week()}"],
          [("Личная информация", "student_info"), ("Оценки", "student_grades"),
           ("Материалы курсов", "student_materials"), ("Домашние задания", "student_homework"),
-          ("Финансы", "student_finance"), ("Умный поиск", "student_search")])
+          ("Финансы", "student_finance"), ("Расписание", "student_schedule"),
+          ("Умный поиск", "student_search")])
 
 
 def p_student_info():
@@ -425,7 +427,7 @@ def p_instructor_home():
                      f"Сегодня: {WEEKDAYS_RU[today.weekday()]}"],
          [("Личная информация", "instructor_info"), ("Предмет", "instructor_subject"),
           ("Материалы курса", "instructor_materials"), ("Домашние задания", "instructor_homework"),
-          ("Умный поиск", "instructor_search")])
+          ("Расписание", "instructor_schedule"), ("Умный поиск", "instructor_search")])
 
 
 def p_instructor_info():
@@ -731,6 +733,8 @@ def p_reg_student():
     available = q("available", db_registrar.get_available_courses, student["id"], default=[])
     prices = q("prices", db_finance.get_course_prices, default={})
     badge(f"Курсы: {len(courses)} из {MAX_COURSES}")
+    st.button("Расписание и регистрация", key="go_sched", type="primary", on_click=go,
+              args=("reg_schedule",))
 
     pending = ss.confirm
     if pending and pending[0] == "remove":
@@ -1344,7 +1348,7 @@ def render_search(back_page):
     st.markdown(SEARCH_CSS, unsafe_allow_html=True)
     cards = []
     for r in results:
-        body = r["body"][:140] + ("…" if len(r["body"]) > 140 else "")
+        body = r["snippet"]
         note = "" if r["mine"] else " · не твой курс"
         cards.append(
             f'<div class="hit">{chip("wait", r["label"])}'
@@ -1430,6 +1434,261 @@ def p_acc_assistant():
     render_assistant("acc_list")
 
 
+# =============================================== расписание и регистрация ====
+
+TT_CSS = f"""<style>
+table.tt {{width:100%; border-collapse:collapse; table-layout:fixed; font-size:.72rem; margin:.4rem 0 1rem;}}
+table.tt th {{background:{c.PINK_MAIN}; color:{c.TEXT_WHITE}; padding:.35rem .1rem; font-weight:700;}}
+table.tt td {{border:1px solid {c.GRAY_LINE}; background:{c.WHITE}; vertical-align:top;
+  padding:.15rem .2rem; height:3rem; overflow:hidden;}}
+table.tt td.h {{width:2.6rem; text-align:center; color:{c.GRAY_TEXT}; background:{c.GRAY_FIELD};
+  vertical-align:middle;}}
+table.tt .lec {{background:{c.PINK_BG}; border-radius:5px; padding:.1rem .2rem; margin-bottom:2px;}}
+table.tt .pra {{background:#E4EEFF; border-radius:5px; padding:.1rem .2rem; margin-bottom:2px;}}
+table.tt .held {{outline:2px dashed {c.PINK_DARK};}}
+table.tt small {{color:{c.GRAY_TEXT};}}
+.st-key-slotgrid [data-testid="stHorizontalBlock"] {{flex-wrap:nowrap !important; gap:.2rem !important;}}
+.st-key-slotgrid [data-testid="stColumn"] {{min-width:0 !important; flex:1 1 0 !important;}}
+.st-key-slotgrid button {{font-size:.68rem !important; padding:.25rem .05rem !important;
+  min-height:2.3rem !important; line-height:1.1 !important;}}
+.st-key-slotgrid .hd {{text-align:center; font-weight:700; font-size:.75rem;}}
+.st-key-slotgrid .hr {{text-align:center; font-size:.72rem; color:{c.GRAY_TEXT}; padding-top:.5rem;}}
+</style>"""
+
+
+def timetable_html(items, kind_key="kind", extra=None):
+    """items: [{'weekday','hour','course_code','kind','room', 'status'?, 'students'?}] -> HTML-таблица недели."""
+    cells = {}
+    for it in items:
+        cells.setdefault((it["weekday"], it["hour"]), []).append(it)
+    head = "<th></th>" + "".join(f"<th>{d}</th>" for d in db_schedule.DAYS)
+    rows = []
+    for h in db_schedule.HOURS:
+        tds = [f'<td class="h">{h}:00</td>']
+        for d in range(1, 6):
+            parts = []
+            for it in cells.get((d, h), []):
+                cls = "lec" if it["kind"] == "lecture" else "pra"
+                if it.get("status") == "held":
+                    cls += " held"
+                note = ""
+                if it.get("students") is not None:
+                    note = f' · {it["students"]} чел.'
+                elif it.get("status") == "held":
+                    note = " · ждёт подтверждения"
+                parts.append(f'<div class="{cls}"><b>{esc(it["course_code"])}</b> '
+                             f'{db_schedule.KIND_SHORT[it["kind"]]}<br>'
+                             f'<small>{esc(it["room"])}{esc(note)}</small></div>')
+            tds.append("<td>" + "".join(parts) + "</td>")
+        rows.append("<tr>" + "".join(tds) + "</tr>")
+    st.markdown(TT_CSS + f'<table class="tt"><thead><tr>{head}</tr></thead><tbody>{"".join(rows)}</tbody></table>',
+                unsafe_allow_html=True)
+    st.caption("Л — лекция, П — практика. Занятия с пунктирной рамкой ещё не подтверждены.")
+
+
+def render_timetable_page(student_id, back_page, register_page, who):
+    """Расписание студента + кнопка регистрации (для самого студента и для регистратора)."""
+    back_bar("← Назад", back_page)
+    title("Расписание")
+    subtitle(who, gray=True)
+    st.button("Зарегистрироваться на курс", key="go_register", type="primary", on_click=go,
+              args=(register_page,))
+    items = q("timetable", db_schedule.student_timetable, student_id, default=[])
+    if not items:
+        subtitle("Пока нет ни одного занятия. Нажми «Зарегистрироваться на курс».", gray=True)
+    timetable_html(items)
+    return items
+
+
+def p_student_schedule():
+    u = ss.user
+    render_timetable_page(u["student_id"], "student_home", "student_register", u["name"])
+
+
+def _toggle_slot(student_id, slot_id, mine):
+    try:
+        if mine:
+            db_schedule.release_slot(student_id, slot_id)
+        else:
+            db_schedule.hold_slot(student_id, slot_id)
+        ss.sched_msg = None
+    except Exception as exc:
+        ss.sched_msg = str(exc) if isinstance(exc, ValueError) else f"Ошибка: {exc}"
+
+
+@st.fragment(run_every="4s")
+def _slot_grid(student_id, code):
+    """Сетка выбора времени. Обновляется сама каждые 4 секунды: так видно, что время заняли другие."""
+    plan = db_schedule.get_plan(code)
+    slots = db_schedule.course_slots(student_id, code)
+    holds = db_schedule.course_holds(student_id, code)
+    cap = db_schedule.get_settings()["capacity"]
+    by_cell = {(s["weekday"], s["hour"]): s for s in slots}
+
+    st.markdown(f"**Выбрано:** лекций {holds['lectures']} из {plan['lectures']}, "
+                f"практик {holds['practices']} из {plan['practices']}")
+    if holds["seconds_left"] is not None:
+        m, s = divmod(max(holds["seconds_left"], 0), 60)
+        st.caption(f"Выбранное время закреплено за тобой ещё {m}:{s:02d}. "
+                   f"Если не подтвердить, оно освободится для других.")
+    if ss.get("sched_msg"):
+        st.warning(ss.sched_msg)
+
+    with st.container(key="slotgrid"):
+        cols = st.columns([0.9] + [1] * 5)
+        cols[0].markdown("&nbsp;")
+        for i, d in enumerate(db_schedule.DAYS):
+            cols[i + 1].markdown(f'<div class="hd">{d}</div>', unsafe_allow_html=True)
+        for h in db_schedule.HOURS:
+            cols = st.columns([0.9] + [1] * 5)
+            cols[0].markdown(f'<div class="hr">{h}:00</div>', unsafe_allow_html=True)
+            for d in range(1, 6):
+                sl = by_cell.get((d, h))
+                if sl is None:
+                    cols[d].write("")
+                    continue
+                short = f'{db_schedule.KIND_SHORT[sl["kind"]]} · {sl["room"].replace("Room ", "")}'
+                key = f"slot_{sl['slot_id']}"
+                if sl["mine"]:
+                    cols[d].button("✓ " + short, key=key, type="primary", use_container_width=True,
+                                   on_click=_toggle_slot, args=(student_id, sl["slot_id"], True))
+                elif sl["used"] >= cap:
+                    cols[d].button("Занято", key=key, disabled=True, use_container_width=True)
+                elif sl["conflict"]:
+                    cols[d].button("Пересеч.", key=key, disabled=True, use_container_width=True)
+                else:
+                    cols[d].button(short, key=key, use_container_width=True,
+                                   on_click=_toggle_slot, args=(student_id, sl["slot_id"], False))
+    st.caption("Л — лекция, П — практика, число — аудитория. Нажми на время, чтобы выбрать; "
+               "ещё раз — чтобы снять выбор.")
+
+
+def _finish_registration(student_id, code, back_page, staff):
+    try:
+        db_schedule.confirm_course(student_id, code, staff)
+    except Exception as exc:
+        ss.sched_msg = str(exc) if isinstance(exc, ValueError) else f"Ошибка: {exc}"
+        return
+    ss.sched_msg = None
+    ss.ctx["sched_course"] = None
+    flash("success", "Регистрация подтверждена: курс добавлен в расписание.")
+    go(back_page)
+
+
+def _cancel_registration(student_id, code):
+    try:
+        db_schedule.cancel_registration(student_id, code)
+    except Exception as exc:
+        ss.sched_msg = f"Ошибка: {exc}"
+        return
+    ss.sched_msg = None
+    ss.ctx["sched_course"] = None
+
+
+def _pick_course(student_id, code):
+    ss.ctx["sched_course"] = {"student": student_id, "code": code}
+    ss.sched_msg = None
+
+
+def render_registration(student_id, back_page, staff=None):
+    back_bar("← Назад", back_page)
+    title("Регистрация на курс")
+    stg = q("sched_settings", db_schedule.get_settings, default={"capacity": 1, "hold_minutes": 5})
+    chosen = ss.ctx.get("sched_course")
+    if not chosen or chosen.get("student") != student_id:
+        chosen = None
+
+    if chosen is None:
+        subtitle(f"Найди курс и выбери время занятий. На каждое время — не больше "
+                 f"{stg['capacity']} студ.; пока ты выбираешь, оно закреплено за тобой "
+                 f"{stg['hold_minutes']} мин.", gray=True)
+        query = st.text_input("Курс", placeholder="🔍 Название курса, например: базы данных",
+                              key=f"reg_q_{student_id}", label_visibility="collapsed").strip()
+        courses = q(f"reg_courses:{query}", db_schedule.search_courses, student_id, query, default=[])
+        if not courses:
+            subtitle("Подходящих курсов не найдено (или студент уже записан на все).", gray=True)
+        for cr in courses:
+            with st.container(border=True):
+                st.markdown(f"**{md(cr['course_code'])}** — {md(cr['course_name'])}  \n"
+                            f"{cr['credits']} кр. · {cr['lectures']} лекц. + {cr['practices']} практ. в неделю")
+                st.button("Выбрать", key=f"pick_{cr['course_code']}", type="primary",
+                          on_click=_pick_course, args=(student_id, cr["course_code"]))
+        return
+
+    code = chosen["code"]
+    plan = q(f"plan:{code}", db_schedule.get_plan, code)
+    if plan is None:
+        ss.ctx["sched_course"] = None
+        st.rerun()
+    subtitle(f"{plan['course_code']} — {plan['course_name']}", gray=True)
+    subtitle(f"В неделю нужно: лекций — {plan['lectures']}, практик — {plan['practices']}.", gray=True)
+    _slot_grid(student_id, code)
+    col1, col2 = st.columns(2)
+    col1.button("Подтвердить регистрацию", key="reg_confirm", type="primary", use_container_width=True,
+                on_click=_finish_registration, args=(student_id, code, back_page, staff))
+    col2.button("Отмена", key="reg_cancel", use_container_width=True,
+                on_click=_cancel_registration, args=(student_id, code))
+
+
+def p_student_register():
+    render_registration(ss.user["student_id"], "student_schedule")
+
+
+def p_instructor_schedule():
+    u = ss.user
+    back_bar("← Назад", "instructor_home")
+    title("Расписание")
+    subtitle(u["name"], gray=True)
+    items = q("itimetable", db_schedule.instructor_timetable, u["instructor_id"], default=[])
+    if not items:
+        subtitle("У тебя пока нет занятий в расписании.", gray=True)
+    timetable_html(items)
+
+
+def p_reg_schedule():
+    student = ss.ctx.get("reg_student")
+    if not student:
+        back_bar("← Назад", "reg_list")
+        return
+    items = render_timetable_page(student["id"], "reg_student", "reg_register",
+                                  f"{student['name']} · ID {student['id']}")
+    courses = {}
+    for it in items:
+        if it["status"] == "confirmed":
+            courses[it["course_code"]] = it["course_name"]
+    if courses:
+        section("Курсы в расписании")
+    pending = ss.confirm
+    for code, cname in courses.items():
+        with st.container(border=True):
+            st.markdown(f"**{md(code)}** — {md(cname)}")
+            if pending == ("drop", code):
+                st.warning("Удалить студента из расписания этого курса? Курс и оценка по нему тоже будут удалены.")
+                col1, col2 = st.columns(2)
+                if col1.button("Да, удалить", key=f"drop_yes_{code}", type="primary"):
+                    try:
+                        db_registrar.remove_course(ss.user, student["id"], code, current_semester())
+                    except Exception as exc:
+                        show_error(exc)
+                    else:
+                        flash("success", "Студент удалён из расписания курса.")
+                        ss.confirm = None
+                        refresh()
+                col2.button("Отмена", key=f"drop_no_{code}", on_click=clear_confirm)
+            else:
+                st.button("Удалить из расписания", key=f"drop_{code}", on_click=set_confirm,
+                          args=(("drop", code),))
+
+
+def p_reg_register():
+    student = ss.ctx.get("reg_student")
+    if not student:
+        back_bar("← Назад", "reg_list")
+        return
+    st.caption(f"Регистрация от имени студента: {student['name']} (ID {student['id']})")
+    render_registration(student["id"], "reg_schedule", staff=ss.user)
+
+
 PAGES = {
     "login": p_login,
     "student_home": p_student_home, "student_info": p_student_info, "student_grades": p_student_grades,
@@ -1437,6 +1696,9 @@ PAGES = {
     "student_finance": p_student_finance, "student_search": p_student_search,
     "instructor_search": p_instructor_search, "it_assistant": p_it_assistant,
     "acc_assistant": p_acc_assistant,
+    "student_schedule": p_student_schedule, "student_register": p_student_register,
+    "instructor_schedule": p_instructor_schedule, "reg_schedule": p_reg_schedule,
+    "reg_register": p_reg_register,
     "instructor_home": p_instructor_home, "instructor_info": p_instructor_info,
     "instructor_subject": p_instructor_subject, "instructor_materials": p_instructor_materials,
     "instructor_homework": p_instructor_homework,
