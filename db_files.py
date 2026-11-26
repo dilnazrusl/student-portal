@@ -14,6 +14,7 @@ import mimetypes
 
 import psycopg2
 
+import doc_text
 import storage
 from db_core import fetch_all, fetch_one, transaction
 
@@ -31,11 +32,13 @@ def _insert_file(cur, kind, name, data, role, uid):
         cur.execute(
             """
             INSERT INTO stored_file (kind, file_name, content_type, size_bytes, storage_backend,
-                                     storage_key, content, uploaded_by_role, uploaded_by_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING file_id
+                                     storage_key, content, uploaded_by_role, uploaded_by_id,
+                                     content_text)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING file_id
             """,
             (kind, name, ctype, len(data), stored["storage_backend"], stored["storage_key"],
-             content, role, uid),
+             content, role, uid,
+             doc_text.extract_text(name, data) if kind == "material" else None),
         )
         return cur.fetchone()[0], stored
     except Exception:
