@@ -4,6 +4,8 @@ storage.py
 «Шкаф для файлов». Здесь решается, ГДЕ лежит содержимое файла:
 
   STORAGE_BACKEND = "db"  (по умолчанию) — прямо в базе Neon, ничего настраивать не нужно;
+  STORAGE_BACKEND = "disk" — в папке на этом же компьютере/сервере (STORAGE_DIR, по умолчанию
+                            ./data/files). Данные никуда не уходят — вариант для локального запуска.
   STORAGE_BACKEND = "s3"  — в облачном объектном хранилище (Cloudflare R2, Backblaze B2,
                             Supabase Storage, AWS S3 — все понимают протокол S3).
 
@@ -20,6 +22,19 @@ from constants import ALLOWED_TYPES, MAX_FILE_MB
 from db_core import _get
 
 _client = None
+
+
+def _base_dir():
+    return os.path.abspath(_get("STORAGE_DIR", "./data/files"))
+
+
+def _disk_path(key):
+    """Путь к файлу на диске; ключ не может выйти за пределы папки хранилища."""
+    base = _base_dir()
+    path = os.path.abspath(os.path.join(base, key))
+    if not path.startswith(base + os.sep):
+        raise ValueError("Недопустимый путь к файлу.")
+    return path
 
 
 def backend():
@@ -64,6 +79,14 @@ def _bucket():
 
 def put(kind, name, data, content_type):
     """Кладёт файл в выбранное хранилище. Возвращает поля для таблицы stored_file."""
+    if backend() == "disk":
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
+        key = f"{kind}/{uuid.uuid4().hex}.{ext}"
+        path = _disk_path(key)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return {"storage_backend": "disk", "storage_key": key, "content": None}
     if backend() == "s3":
         ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
         key = f"{kind}/{uuid.uuid4().hex}.{ext}"
@@ -75,6 +98,9 @@ def put(kind, name, data, content_type):
 
 def get(storage_backend, storage_key, content):
     """Достаёт содержимое файла (по тому, где он лежит на самом деле)."""
+    if storage_backend == "disk":
+        with open(_disk_path(storage_key), "rb") as fh:
+            return fh.read()
     if storage_backend == "s3":
         return _s3().get_object(Bucket=_bucket(), Key=storage_key)["Body"].read()
     return bytes(content) if content is not None else b""
@@ -82,6 +108,12 @@ def get(storage_backend, storage_key, content):
 
 def delete(storage_backend, storage_key):
     """Удаляет объект из облака (для варианта «в базе» ничего делать не нужно)."""
+    if storage_backend == "disk" and storage_key:
+        try:
+            os.remove(_disk_path(storage_key))
+        except Exception as exc:
+            print("Не удалось удалить файл с диска:", exc)
+        return
     if storage_backend == "s3" and storage_key:
         try:
             _s3().delete_object(Bucket=_bucket(), Key=storage_key)
