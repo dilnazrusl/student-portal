@@ -35,6 +35,7 @@ def search(query, role, user_id, limit=15):
     query = " ".join((query or "").split())[:100]
     if len(query) < 2:
         return []
+    words = highlight_words(query)
     mine = _my_courses(role, user_id)
     rows = fetch_all(
         "SELECT doc_type, course_code, title, body, ref_id, score "
@@ -47,8 +48,23 @@ def search(query, role, user_id, limit=15):
             continue                      # чужие материалы и задания не показываем
         out.append({"type": doc_type, "label": DOC_LABELS.get(doc_type, doc_type),
                     "course_code": code, "course_name": names.get(code, ""),
-                    "title": title, "body": body or "", "score": float(score), "mine": is_mine})
+                    "title": title, "body": body or "", "snippet": snippet(body, words), "score": float(score), "mine": is_mine})
     return out[:limit]
+
+
+def snippet(text, words, width=170):
+    """Кусок текста вокруг первого найденного слова (чтобы видеть, ГДЕ в документе совпало)."""
+    text = " ".join((text or "").split())
+    if len(text) <= width:
+        return text
+    pos = -1
+    for w in words:
+        i = text.lower().find(w)
+        if i != -1 and (pos == -1 or i < pos):
+            pos = i
+    start = max(0, pos - width // 3) if pos != -1 else 0
+    chunk = text[start:start + width]
+    return ("…" if start > 0 else "") + chunk + ("…" if start + width < len(text) else "")
 
 
 def highlight_words(query):
