@@ -99,11 +99,11 @@ PAYMENT_METHODS = [("Kaspi", "Kaspi"), ("Card", "Банковская карта
                    ("Cash", "Наличные"), ("Transfer", "Банковский перевод")]
 PAYMENT_METHOD_RU = dict(PAYMENT_METHODS)
 
-MAX_FILE_MB = 5   # максимальный размер ЛЮБОГО файла (для всех ролей); тот же лимит в .streamlit/config.toml
+MAX_FILE_MB = 10   # максимальный размер ЛЮБОГО файла (для всех ролей); тот же лимит в .streamlit/config.toml (maxUploadSize)
 
 # какие расширения можно загружать
 ALLOWED_TYPES = {
-    "material": ["pdf", "docx", "pptx", "txt", "png", "jpg", "jpeg"],
-    "homework": ["pdf", "docx", "txt", "zip", "png", "jpg", "jpeg"],
+    "material": ["pdf", "docx", "pptx", "xlsx", "csv", "txt", "md", "zip", "png", "jpg", "jpeg"],
+    "homework": ["pdf", "docx", "pptx", "xlsx", "csv", "txt", "md", "zip", "png", "jpg", "jpeg"],
     "receipt": ["pdf", "png", "jpg", "jpeg"],
 }
